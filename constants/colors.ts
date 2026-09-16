@@ -9,3 +9,4 @@ export const COLORS = {
   border: '#E0E8F0',
   shadow: '#0D47A1',
 } as const;
+
