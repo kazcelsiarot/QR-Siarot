@@ -2,7 +2,8 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import DateTimePicker, {
   type DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
-import { useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { useCallback, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -16,7 +17,10 @@ import QRCode from 'react-native-qrcode-svg';
 
 import AppButton from '@/components/AppButton';
 import { COLORS } from '@/constants/colors';
-import { createEvent } from '@/lib/database';
+import { useAuth } from '@/lib/auth';
+import { createEvent } from '@/lib/events';
+import { buildQRPayload } from '@/lib/qr';
+import { getProfile } from '@/lib/profiles';
 
 function toLocalISO(date: Date) {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -43,18 +47,48 @@ const QUICK_END_OPTIONS = [
 type EditTarget = 'start' | 'end';
 
 export default function TeacherScreen() {
+  const { user } = useAuth();
+  const [role, setRole] = useState<string | null>(null);
+  const [roleLoading, setRoleLoading] = useState(true);
+
   const [title, setTitle] = useState('');
   const [eventId, setEventId] = useState('');
   const [startDate, setStartDate] = useState(() => new Date());
   const [endDate, setEndDate] = useState(
     () => new Date(Date.now() + 60 * 60 * 1000)
   );
+
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   const [editingPart, setEditingPart] = useState<'date' | 'time'>('date');
   const [payload, setPayload] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const isAndroid = Platform.OS === 'android';
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+
+      if (!user) {
+        setRoleLoading(false);
+        return () => {
+          active = false;
+        };
+      }
+
+      setRoleLoading(true);
+
+      getProfile(user.id).then((profile) => {
+        if (!active) return;
+        setRole(profile?.role ?? 'student');
+        setRoleLoading(false);
+      });
+
+      return () => {
+        active = false;
+      };
+    }, [user])
+  );
 
   const openPicker = (target: EditTarget) => {
     setMessage(null);
@@ -75,7 +109,11 @@ export default function TeacherScreen() {
 
     const current = editTarget === 'start' ? startDate : endDate;
     const next = new Date(current);
-    next.setFullYear(selected.getFullYear(), selected.getMonth(), selected.getDate());
+    next.setFullYear(
+      selected.getFullYear(),
+      selected.getMonth(),
+      selected.getDate()
+    );
     next.setHours(selected.getHours(), selected.getMinutes(), 0, 0);
 
     if (editTarget === 'start') setStartDate(next);
@@ -112,19 +150,40 @@ export default function TeacherScreen() {
       return;
     }
 
-    createEvent(event).then(() => {
+    createEvent(event).then(({ error }) => {
+      if (error) {
+        setMessage(error);
+        return;
+      }
+
       setMessage('Event saved! Scan the QR with the Scan tab to test it.');
-      setPayload(
-        JSON.stringify({
-          v: 1,
-          event: event.eventId,
-          title: event.title,
-          start: event.start,
-          end: event.end,
-        })
-      );
+      setPayload(buildQRPayload(event));
     });
   };
+
+  if (roleLoading) {
+    return (
+      <View style={styles.lockContainer}>
+        <Text style={styles.lockTitle}>Checking your account...</Text>
+      </View>
+    );
+  }
+
+  if (role !== 'teacher') {
+    return (
+      <View style={styles.lockContainer}>
+        <Ionicons
+          name="lock-closed-outline"
+          size={48}
+          color={COLORS.primary}
+        />
+        <Text style={styles.lockTitle}>Teachers Only</Text>
+        <Text style={styles.lockMessage}>
+          Only teacher accounts can create events.
+        </Text>
+      </View>
+    );
+  }
 
   return (
     <ScrollView
@@ -169,6 +228,7 @@ export default function TeacherScreen() {
         icon="moon-outline"
         onPress={() => openPicker('end')}
       />
+
       <View style={styles.chipRow}>
         {QUICK_END_OPTIONS.map((option) => (
           <Pressable
@@ -180,6 +240,7 @@ export default function TeacherScreen() {
           </Pressable>
         ))}
       </View>
+
       <Text style={styles.hint}>Tap a chip to set the end time from start.</Text>
 
       {message && <Text style={styles.message}>{message}</Text>}
@@ -207,9 +268,11 @@ export default function TeacherScreen() {
           <Text style={styles.resultTitle}>
             Scan this QR code with the Scan tab:
           </Text>
+
           <View style={styles.qrBox}>
             <QRCode value={payload} size={200} />
           </View>
+
           <Text style={styles.payloadText}>{payload}</Text>
         </View>
       )}
@@ -226,12 +289,19 @@ type PickerFieldProps = {
 function PickerField({ value, icon, onPress }: PickerFieldProps) {
   return (
     <Pressable
-      style={({ pressed }) => [styles.pickerField, pressed && styles.pickerFieldPressed]}
+      style={({ pressed }) => [
+        styles.pickerField,
+        pressed && styles.pickerFieldPressed,
+      ]}
       onPress={onPress}
     >
       <Ionicons name={icon} size={20} color={COLORS.primary} />
       <Text style={styles.pickerValue}>{value}</Text>
-      <Ionicons name="calendar-outline" size={18} color={COLORS.textSecondary} />
+      <Ionicons
+        name="calendar-outline"
+        size={18}
+        color={COLORS.textSecondary}
+      />
     </Pressable>
   );
 }
@@ -357,5 +427,23 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 16,
   },
+  lockContainer: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  lockTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    marginTop: 12,
+  },
+  lockMessage: {
+    fontSize: 14,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
+    marginTop: 6,
+  },
 });
-
